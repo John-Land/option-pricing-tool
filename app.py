@@ -1,9 +1,22 @@
+# ==============================================================================
+# ADVANCED OPTION PRICING & FAT-TAIL RISK ANALYSIS TOOL
+# ==============================================================================
+# Architectural Rationale & Quantitative Overview:
+# This application is engineered to overcome the structural fallacies of standard 
+# Black-Scholes pricing (which assumes Gaussian returns and constant volatility). 
+# By integrating Extreme Value Theory (EVT), Generalized Pareto Distributions (GPD), 
+# robust $L_1$ Mean Absolute Deviation (MAD) filtering, and static Paretian tail 
+# scaling, this tool evaluates deep out-of-the-money options and complex multi-leg 
+# structures against physical, real-world expected returns rather than 
+# artificial risk-neutral implied surfaces.
+# ==============================================================================
+
 import datetime
 from scipy.optimize import minimize
 from scipy.stats import genpareto, norm
 import numpy as np
 import pandas as pd
-# Imports for exact US Trading Day calculations
+# Imports for exact US Trading Day calculations via pandas holiday calendars
 from pandas.tseries.holiday import (
     AbstractHolidayCalendar,
     GoodFriday,
@@ -20,14 +33,16 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-# ==========================================
-# 1. CORE MATH & LEGS LOGIC
-# ==========================================
-
+# ==============================================================================
+# 1. CORE MATH, TRADING CALENDAR & PAYOFF/GREEK UTILITIES
+# ==============================================================================
 
 class USTradingCalendar(AbstractHolidayCalendar):
-    """Custom holiday calendar defining exact US market holidays (NYSE/NASDAQ)."""
-
+    """
+    Custom US Trading Calendar (NYSE/NASDAQ).
+    Defines official market holidays to ensure precise business day and trading 
+    day distance calculations between today and option expiration dates.
+    """
     rules = [
         Holiday("NewYearsDay", month=1, day=1, observance=nearest_workday),
         USMartinLutherKingJr,
@@ -43,6 +58,18 @@ class USTradingCalendar(AbstractHolidayCalendar):
 
 
 def calculate_payoff(S_T: np.ndarray, legs: list) -> np.ndarray:
+    """
+    Vectorized Terminal Payoff Calculator.
+    Computes the aggregate intrinsic cash value of a multi-leg option structure 
+    across a simulated array of terminal underlying spot prices (S_T).
+    
+    Parameters:
+    - S_T (np.ndarray): Array of simulated underlying spot prices at expiry.
+    - legs (list): List of dictionaries containing option type ('call'/'put'), strike, and position quantity.
+    
+    Returns:
+    - np.ndarray: Aggregate cash payoff for each simulated path.
+    """
     total_payoff = np.zeros_like(S_T)
     for leg in legs:
         if leg["type"] == "call":
@@ -62,10 +89,22 @@ def calculate_structure_greek(
     sigma: float,
     greek: str,
 ) -> np.ndarray:
-    """Vectorized calculation of total structure Value & Greeks across an array of spot prices.
-
-    Uses standard Black-Scholes partial derivatives and Risk Neutral Pricing.
-    Includes secondary cross-derivatives for advanced risk profiling.
+    """
+    Vectorized Option Greeks and Valuation Engine.
+    Computes analytical Black-Scholes values or specific first- and second-order Greeks 
+    (Delta, Gamma, Vega, Theta, Rho, Vomma, Vanna) across an array of spot prices.
+    
+    Parameters:
+    - S (np.ndarray): Array of underlying spot prices.
+    - legs (list): Option structure leg definitions.
+    - T (float): Time to expiration in years.
+    - r (float): Risk-free interest rate.
+    - q (float): Continuous dividend yield.
+    - sigma (float): Volatility parameter.
+    - greek (str): Target metric name ('BS Value', 'Delta', 'Gamma', etc.).
+    
+    Returns:
+    - np.ndarray: Aggregated structural Greek or valuation across the spot array.
     """
     total_val = np.zeros_like(S, dtype=float)
     T_safe = max(T, 1e-5)  # Prevent division by zero near expiration
@@ -88,7 +127,6 @@ def calculate_structure_greek(
 
         val = np.zeros_like(S)
 
-        # Calculate Option Premium (Risk Neutral Value) or its respective Greeks
         if greek == "BS Value":
             if type_ == "call":
                 val = (
@@ -110,7 +148,7 @@ def calculate_structure_greek(
         elif greek == "Vega":
             val = (
                 S * np.exp(-q * T_safe) * n_d1 * np.sqrt(T_safe)
-            ) / 100.0  # Per 1% change
+            ) / 100.0
         elif greek == "Theta":
             term1 = -(S * n_d1 * sigma * np.exp(-q * T_safe)) / (
                 2 * np.sqrt(T_safe)
@@ -133,21 +171,28 @@ def calculate_structure_greek(
             else:
                 val = (-K * T_safe * np.exp(-r * T_safe) * N_neg_d2) / 100.0
         elif greek == "Vomma":
-            # dVega/dVol = Vega * d1 * d2 / sigma
             vega_raw = S * np.exp(-q * T_safe) * n_d1 * np.sqrt(T_safe)
             val = (
                 vega_raw * d1 * d2 / sigma
-            ) / 10000.0  # Scaled for 1% x 1% convexity mapping
+            ) / 10000.0 
         elif greek == "Vanna":
-            # dDelta/dVol = -exp(-qT) * n(d1) * d2 / sigma
             val = (
                 -np.exp(-q * T_safe) * n_d1 * d2 / sigma
-            ) / 100.0  # Per 1% Vol change mapping to Delta
+            ) / 100.0 
 
         total_val += pos * val
 
     return total_val
 
+
+# ==============================================================================
+# 2. PRICING MODEL 1: STANDARD BLACK-SCHOLES (CONSTANT VOLATILITY)
+# ==============================================================================
+# Thought Process & Statistical Rationale:
+# Assumes returns are lognormal and volatility is perfectly constant. It completely
+# ignores fat tails and market fragility, serving as the standard theoretical baseline
+# against which all fat-tail models are compared.
+# ==============================================================================
 
 def value_option_black_scholes(
     S_0: float,
@@ -185,6 +230,17 @@ def value_option_black_scholes(
 
     return expected_value, S_T, payoffs
 
+
+# ==============================================================================
+# 3. PRICING MODEL 2: BLACK-SCHOLES MIXTURE MODEL (BOOTSTRAPPED EMPIRICAL VOL)
+# ==============================================================================
+# Thought Process & Statistical Rationale:
+# Recognizes that volatility is not constant. By sampling from historical rolling
+# volatility regimes, it builds a mixture distribution. Because option prices are
+# convex to volatility (positive Vomma), Jensen's Inequality ensures this prices higher
+# than Model 1. However, it suffers from empirical truncation (cannot simulate
+# volatilities higher than historical max).
+# ==============================================================================
 
 def value_option_bootstrap_volatility(
     S_0: float,
@@ -230,9 +286,86 @@ def value_option_bootstrap_volatility(
     return expected_value, S_T, payoffs, sampled_vols
 
 
+# ==============================================================================
+# 4. PRICING MODEL 3: BLACK-SCHOLES HYBRID MIXTURE MODEL (EMPIRICAL BODY + EVT TAIL)
+# ==============================================================================
+# Thought Process & Statistical Rationale:
+# Fixes the truncation flaw of Model 2 by applying Extreme Value Theory (EVT) to 
+# the right tail of the volatility distribution using a Generalized Pareto Distribution (GPD).
+# Allows synthesis of unprecedented volatility panics beyond historical maximums.
+# ==============================================================================
+
+def value_option_fitted_tail_volatility(
+    S_0: float,
+    legs: list,
+    T: float,
+    r: float,
+    mu: float,
+    hist_vol_array: np.ndarray,
+    q: float = 0.0,
+    num_simulations: int = 10000,
+    tail_percentile: float = 90.0,
+) -> tuple:
+    threshold = np.percentile(hist_vol_array, tail_percentile)
+    body_vols = hist_vol_array[hist_vol_array <= threshold]
+    tail_vols = hist_vol_array[hist_vol_array > threshold]
+    
+    exceedances = tail_vols - threshold
+    if len(exceedances) > 0:
+        shape, loc, scale = genpareto.fit(exceedances, floc=0)
+    else:
+        shape, scale = 0.001, 0.001
+        
+    U = np.random.uniform(0, 1, num_simulations)
+    sampled_vols = np.zeros(num_simulations)
+    
+    body_mask = U <= (tail_percentile / 100.0)
+    sampled_vols[body_mask] = np.random.choice(body_vols, size=np.sum(body_mask), replace=True)
+    
+    tail_mask = ~body_mask
+    if np.any(tail_mask):
+        tail_U = (U[tail_mask] - (tail_percentile / 100.0)) / (1 - (tail_percentile / 100.0))
+        simulated_exceedances = genpareto.ppf(tail_U, shape, loc=0, scale=scale)
+        sampled_vols[tail_mask] = threshold + simulated_exceedances
+        
+    simulated_values = np.zeros(num_simulations)
+    
+    for leg in legs:
+        K = leg["strike"]
+        d1 = (np.log(S_0 / K) + (mu - q + 0.5 * sampled_vols**2) * T) / (
+            sampled_vols * np.sqrt(T)
+        )
+        d2 = d1 - sampled_vols * np.sqrt(T)
+
+        if leg["type"] == "call":
+            vals = (S_0 * np.exp((mu - q) * T) * norm.cdf(d1)) - (
+                K * norm.cdf(d2)
+            )
+        else:
+            vals = (K * norm.cdf(-d2)) - (
+                S_0 * np.exp((mu - q) * T) * norm.cdf(-d1)
+            )
+
+        simulated_values += leg["pos"] * vals
+
+    expected_value = float(np.mean(simulated_values) * np.exp(-r * T))
+
+    Z = np.random.standard_normal(num_simulations)
+    S_T = S_0 * np.exp(
+        (mu - q - 0.5 * sampled_vols**2) * T + sampled_vols * np.sqrt(T) * Z
+    )
+    payoffs = calculate_payoff(S_T, legs)
+
+    return expected_value, S_T, payoffs, sampled_vols, float(shape)
+
+
 def fit_gpd(
     returns: np.ndarray, percentile: float = 5, tail: str = "left"
 ) -> tuple:
+    """
+    Fits a Generalized Pareto Distribution (GPD) to extreme return exceedances.
+    Used by EVT engines to model left and right tail risk parameters.
+    """
     if tail == "left":
         threshold = float(np.percentile(returns, percentile))
         exceedances = threshold - returns[returns < threshold]
@@ -246,6 +379,14 @@ def fit_gpd(
     shape, loc, scale = genpareto.fit(exceedances, floc=0)
     return float(threshold), float(shape), float(scale)
 
+
+# ==============================================================================
+# 5. PRICING MODEL 4: RETURN-BASED EVT MODEL (EMPIRICAL CENTER + EVT TAILS)
+# ==============================================================================
+# Thought Process & Statistical Rationale:
+# Abandons Gaussian assumptions for daily return paths, splicing an empirical center
+# with GPD fitted left and right tails. Simulates path-dependent jumps directly.
+# ==============================================================================
 
 def value_option_evt_two_tailed(
     S_0: float,
@@ -314,12 +455,141 @@ def value_option_evt_two_tailed(
     return expected_value, S_T, payoffs, float(l_xi), float(r_xi)
 
 
-# ==========================================
-# GARCH-EVT ENGINE (MODEL 4)
-# ==========================================
+# ==============================================================================
+# 6. PRICING MODEL 5: DECLUSTERED RETURN-BASED EVT MODEL (RUNS METHOD)
+# ==============================================================================
+# Thought Process & Statistical Rationale:
+# Resolves the volatility clustering flaw of Model 4. Because extreme shocks cluster,
+# fitting EVT directly to dependent returns overstates tail risk. This model applies 
+# the Runs Method ($k=5$ day window) to extract independent block maxima, isolating 
+# true standalone black swans for Paretian tail fitting ($\alpha = 1/\xi$).
+# ==============================================================================
 
+def decluster_extremes(returns: np.ndarray, threshold: float, tail: str = "left", k: int = 5) -> np.ndarray:
+    """
+    Extracts independent block maxima using the Runs Method with a fixed k-day window.
+    Ensures clustered exceedances are grouped into single independent events.
+    """
+    if tail == "left":
+        exceedance_indices = np.where(returns < threshold)[0]
+    else:
+        exceedance_indices = np.where(returns > threshold)[0]
+        
+    if len(exceedance_indices) == 0:
+        return np.array([])
+        
+    clusters = []
+    current_cluster = [exceedance_indices[0]]
+    
+    for i in range(1, len(exceedance_indices)):
+        if exceedance_indices[i] - exceedance_indices[i-1] <= k:
+            current_cluster.append(exceedance_indices[i])
+        else:
+            clusters.append(current_cluster)
+            current_cluster = [exceedance_indices[i]]
+    clusters.append(current_cluster)
+    
+    declustered_exceedances = []
+    for cluster in clusters:
+        cluster_returns = returns[cluster]
+        if tail == "left":
+            max_exceedance = threshold - np.min(cluster_returns)
+        else:
+            max_exceedance = np.max(cluster_returns) - threshold
+        declustered_exceedances.append(max_exceedance)
+        
+    return np.array(declustered_exceedances)
+
+
+def value_option_evt_declustered(
+    S_0: float,
+    legs: list,
+    T: float,
+    r: float,
+    mu: float,
+    hist_returns: np.ndarray,
+    q: float = 0.0,
+    tail_percentile: float = 5,
+    num_simulations: int = 10000,
+    trading_days: int = 30,
+    k_window: int = 5,
+) -> tuple:
+    dt = 1 / 252
+
+    l_thresh = float(np.percentile(hist_returns, tail_percentile))
+    r_thresh = float(np.percentile(hist_returns, 100 - tail_percentile))
+
+    l_exceedances = decluster_extremes(hist_returns, l_thresh, tail="left", k=k_window)
+    r_exceedances = decluster_extremes(hist_returns, r_thresh, tail="right", k=k_window)
+
+    if len(l_exceedances) == 0:
+        l_xi, l_beta = 0.001, 0.001
+    else:
+        l_xi, _, l_beta = genpareto.fit(l_exceedances, floc=0)
+
+    if len(r_exceedances) == 0:
+        r_xi, r_beta = 0.001, 0.001
+    else:
+        r_xi, _, r_beta = genpareto.fit(r_exceedances, floc=0)
+
+    center_returns = hist_returns[
+        (hist_returns >= l_thresh) & (hist_returns <= r_thresh)
+    ]
+    if len(center_returns) == 0:
+        center_returns = hist_returns
+
+    historical_mean = float(np.mean(hist_returns))
+    center_returns = center_returns - historical_mean
+
+    S_T = np.zeros(num_simulations)
+
+    for i in range(num_simulations):
+        u_array = np.random.uniform(0, 1, trading_days)
+        path_returns = np.zeros(trading_days)
+
+        left_mask = u_array < (tail_percentile / 100)
+        if np.any(left_mask):
+            tail_draws = genpareto.rvs(
+                l_xi, loc=0, scale=l_beta, size=np.sum(left_mask)
+            )
+            path_returns[left_mask] = (l_thresh - historical_mean) - tail_draws
+
+        right_mask = u_array > (1 - (tail_percentile / 100))
+        if np.any(right_mask):
+            tail_draws = genpareto.rvs(
+                r_xi, loc=0, scale=r_beta, size=np.sum(right_mask)
+            )
+            path_returns[right_mask] = (r_thresh - historical_mean) + tail_draws
+
+        center_mask = ~(left_mask | right_mask)
+        if np.any(center_mask):
+            path_returns[center_mask] = np.random.choice(
+                center_returns, size=np.sum(center_mask)
+            )
+
+        drift_adjustment = (
+            mu - q - 0.5 * float(np.var(hist_returns))
+        ) * trading_days * dt
+        S_T[i] = S_0 * np.exp(np.sum(path_returns) + drift_adjustment)
+
+    payoffs = calculate_payoff(S_T, legs)
+    expected_value = float(np.mean(payoffs) * np.exp(-r * T))
+
+    return expected_value, S_T, payoffs, float(l_xi), float(r_xi)
+
+
+# ==============================================================================
+# 7. PRICING MODEL 6: GARCH-EVT FILTERED HISTORICAL SIMULATION ($L_2$ NORM)
+# ==============================================================================
+# Thought Process & Statistical Rationale:
+# Combines GARCH(1,1) dynamic variance modeling with EVT innovations. Captures 
+# volatility persistence (shocks today spike volatility tomorrow). However, 
+# because it relies on squared returns ($L_2$ norm), it can become numerically 
+# unstable in fat-tailed environments where the fourth moment is undefined.
+# ==============================================================================
 
 def fit_garch_11(returns: np.ndarray) -> tuple:
+    """Fits a GARCH(1,1) volatility model using Maximum Likelihood Estimation."""
     centered_returns = returns - np.mean(returns)
     var_long_term = np.var(centered_returns)
 
@@ -362,6 +632,7 @@ def fit_garch_11(returns: np.ndarray) -> tuple:
 def extract_garch_innovations(
     returns: np.ndarray, hist_var_array: np.ndarray
 ) -> np.ndarray:
+    """Standardizes returns into GARCH innovations (residuals)."""
     centered_returns = returns - np.mean(returns)
     innovations = centered_returns / np.sqrt(hist_var_array)
     return innovations
@@ -446,12 +717,93 @@ def value_option_garch_evt(
     return expected_value, S_T, payoffs, omega, alpha, beta
 
 
-# ==========================================
-# UTILITY & PLOTTING FUNCTIONS
-# ==========================================
+# ==============================================================================
+# 8. PRICING MODEL 7: MAD-BASED FILTERED HISTORICAL SIMULATION ($L_1$ NORM + EVT)
+# ==============================================================================
+# Thought Process & Statistical Rationale:
+# The mathematically optimal path-dependent engine for fat-tailed markets. Replaces 
+# fragile $L_2$ variance with $L_1$ Mean Absolute Deviation (MAD). Because the first 
+# moment of financial returns is finite ($\alpha > 1$), $L_1$ standardizes returns 
+# safely without noise amplification, allowing recursive volatility updates 
+# and EVT tail draws without GARCH explosion.
+# ==============================================================================
 
+def calculate_ewma_mad(returns: np.ndarray, lam: float = 0.94) -> np.ndarray:
+    """Calculates the EWMA Mean Absolute Deviation (L1 filter) array."""
+    mad = np.zeros_like(returns)
+    mad[0] = np.mean(np.abs(returns))
+    for t in range(1, len(returns)):
+        mad[t] = lam * mad[t-1] + (1 - lam) * np.abs(returns[t-1])
+    return np.maximum(mad, 1e-8)  # Prevent division by zero
+
+
+def value_option_mad_fhs_evt(
+    S_0: float, legs: list, T: float, r: float, mu: float,
+    hist_returns: np.ndarray, q: float = 0.0, tail_percentile: float = 5,
+    num_simulations: int = 10000, trading_days: int = 30, 
+    k_window: int = 5, lam: float = 0.94
+) -> tuple:
+    dt = 1 / 252
+    
+    hist_mad = calculate_ewma_mad(hist_returns, lam)
+    z_residuals = hist_returns / hist_mad
+    
+    l_thresh = float(np.percentile(z_residuals, tail_percentile))
+    r_thresh = float(np.percentile(z_residuals, 100 - tail_percentile))
+    
+    l_exceedances = decluster_extremes(z_residuals, l_thresh, tail="left", k=k_window)
+    r_exceedances = decluster_extremes(z_residuals, r_thresh, tail="right", k=k_window)
+
+    l_xi, _, l_beta = genpareto.fit(l_exceedances, floc=0) if len(l_exceedances) > 0 else (0.001, 0, 0.001)
+    r_xi, _, r_beta = genpareto.fit(r_exceedances, floc=0) if len(r_exceedances) > 0 else (0.001, 0, 0.001)
+
+    center_z = z_residuals[(z_residuals >= l_thresh) & (z_residuals <= r_thresh)]
+    if len(center_z) == 0:
+        center_z = z_residuals
+    center_z = center_z - np.mean(center_z)
+
+    S_T = np.zeros(num_simulations)
+    mad_0 = hist_mad[-1]
+    
+    for i in range(num_simulations):
+        u_array = np.random.uniform(0, 1, trading_days)
+        z_path = np.zeros(trading_days)
+        
+        left_mask = u_array < (tail_percentile / 100)
+        if np.any(left_mask):
+            z_path[left_mask] = l_thresh - genpareto.rvs(l_xi, loc=0, scale=l_beta, size=np.sum(left_mask))
+            
+        right_mask = u_array > (1 - (tail_percentile / 100))
+        if np.any(right_mask):
+            z_path[right_mask] = r_thresh + genpareto.rvs(r_xi, loc=0, scale=r_beta, size=np.sum(right_mask))
+            
+        center_mask = ~(left_mask | right_mask)
+        if np.any(center_mask):
+            z_path[center_mask] = np.random.choice(center_z, size=np.sum(center_mask))
+            
+        current_S = S_0
+        current_mad = mad_0
+        
+        for t in range(trading_days):
+            r_sim = z_path[t] * current_mad
+            drift_t = (mu - q - 0.5 * (current_mad**2 * 252)) * dt
+            current_S *= np.exp(r_sim + drift_t)
+            current_mad = lam * current_mad + (1 - lam) * np.abs(r_sim)
+            
+        S_T[i] = current_S
+
+    payoffs = calculate_payoff(S_T, legs)
+    expected_value = float(np.mean(payoffs) * np.exp(-r * T))
+
+    return expected_value, S_T, payoffs, float(l_xi), float(r_xi)
+
+
+# ==============================================================================
+# 9. PLOTTING & VISUALIZATION UTILITIES
+# ==============================================================================
 
 def safe_pct_diff(val: float, base: float) -> str:
+    """Calculates percentage difference safely against Black-Scholes baseline."""
     try:
         v = float(val)
         b = float(base)
@@ -463,6 +815,7 @@ def safe_pct_diff(val: float, base: float) -> str:
 
 
 def generate_percentile_string(S_T_array: np.ndarray, strikes: list) -> str:
+    """Generates structural probability distribution strings for strike mapping."""
     parts = []
     for k in strikes:
         pct = np.mean(S_T_array <= k) * 100
@@ -473,6 +826,7 @@ def generate_percentile_string(S_T_array: np.ndarray, strikes: list) -> str:
 def plot_structure_payoff(
     S_0: float, legs: list, structure_name: str, direction: str
 ) -> go.Figure:
+    """Generates the interactive Plotly terminal payoff diagram."""
     strikes = sorted(list({leg["strike"] for leg in legs}))
     min_K = min(strikes + [S_0])
     max_K = max(strikes + [S_0])
@@ -551,6 +905,7 @@ def plot_histograms(
     bs_vol_marker: float = None,
     rolling_window_days: int = None,
 ) -> go.Figure:
+    """Generates comparative simulation output histograms for spot prices and option payoffs."""
     if vol_dist is not None:
         fig = make_subplots(
             rows=1,
@@ -670,10 +1025,8 @@ def plot_histograms(
     return fig
 
 
-# --- GREEK PROFILER PLOTTING FUNCTIONS ---
-
-
 def plot_t_step_profile(S_range, S_0, strikes, legs, T, r, q, sigma, greek):
+    """Plots 2D time-decay profiles for Greeks across spot prices."""
     fig = go.Figure()
 
     val_0 = calculate_structure_greek(S_range, legs, T, r, q, sigma, greek)
@@ -768,13 +1121,12 @@ def plot_t_step_profile(S_range, S_0, strikes, legs, T, r, q, sigma, greek):
 def plot_vol_shock_profile(
     S_range, S_0, strikes, legs, T, r, q, sigma_base, rolling_vol, greek
 ):
-    """Updated to use sigma_base for the base curve, while using rolling_vol for the crush (10th pct) and shock (99th pct) limits."""
+    """Plots volatility shock sensitivity profiles for Greeks across spot prices."""
     fig = go.Figure()
 
     shock_down = np.percentile(rolling_vol, 10)
     shock_up = np.percentile(rolling_vol, 99)
 
-    # Base Trace evaluates at the Analytical Full History Baseline (bs_sigma)
     val_base = calculate_structure_greek(
         S_range, legs, T, r, q, sigma_base, greek
     )
@@ -865,6 +1217,7 @@ def plot_vol_shock_profile(
 def plot_3d_risk_surface_time(
     S_range, S_0, strikes, legs, T, r, q, sigma, greek
 ):
+    """Generates 3D risk surface (Spot vs Time vs Greek)."""
     days = np.linspace(int(T * 365), 1, 30)
     T_array = days / 365.0
 
@@ -922,6 +1275,7 @@ def plot_3d_risk_surface_time(
 def plot_3d_risk_surface_vol(
     S_range, S_0, strikes, legs, T, r, q, sigma_base, greek
 ):
+    """Generates 3D risk surface (Spot vs Volatility vs Greek)."""
     vols = np.linspace(max(0.05, sigma_base - 0.20), sigma_base + 0.30, 30)
 
     Z = np.zeros((len(vols), len(S_range)))
@@ -975,9 +1329,9 @@ def plot_3d_risk_surface_vol(
     return fig
 
 
-# ==========================================
-# TOOLTIP EXPLANATIONS (MARKDOWN & LATEX)
-# ==========================================
+# ==============================================================================
+# 10. TOOLTIP EXPLANATIONS & EDUCATIONAL DOCUMENTATION STRINGS
+# ==============================================================================
 
 help_text_m1 = r"""
 **The Intuition:** Values the option analytically assuming volatility is perfectly constant and returns follow a smooth Lognormal distribution (no Black Swans).
@@ -1005,6 +1359,17 @@ Option prices are strictly convex to volatility (positive Volga/Vomma). A massiv
 """
 
 help_text_m3 = r"""
+**The Intuition:** Addresses the truncation flaw in standard empirical bootstrapping. Instead of capping simulated volatility at the historical maximum, it fits Extreme Value Theory (EVT) to the right tail of the volatility distribution, allowing the Monte Carlo engine to synthesize unprecedented volatility spikes.
+
+**The Math (Distributions & Drift):**
+* **The Empirical Body:** $\sigma \le u$ (Samples directly from the bottom 90% of historical volatilities)
+* **The GPD Volatility Tail:** $\sigma > u$ modeled as $y = \sigma - u \sim G_{\xi, \beta}(y)$
+* **Terminal Price ($Z$):** $S_T = S_0 \exp(\mu_{adj, i} T + \sigma_i \sqrt{T} Z)$ where $Z \sim N(0,1)$
+
+**Implementation:** Uses Inverse Transform Sampling. If a random draw falls in the top 10%, it projects the probability into the Inverse CDF of the fitted Generalized Pareto Distribution, generating extreme volatilities that mathematically expand Volatility Convexity (Vomma/Volga) beyond historical boundaries.
+"""
+
+help_text_m4 = r"""
 **The Intuition:** Abandons Normal distribution assumptions entirely. Simulates daily steps using exact historical returns, augmented with Extreme Value Theory (EVT) to accurately model physical "Black Swan" jumps.
 
 **The Math (Distributions & Drift):**
@@ -1015,7 +1380,18 @@ help_text_m3 = r"""
 **Implementation:** Simulates the path day-by-day. It draws a uniform random variable $U \sim U(0,1)$. If $U < 0.05$, it draws a massive crash from the Left GPD tail. If $U > 0.95$, it draws a squeeze from the Right GPD tail. Otherwise, it samples a normal historical day.
 """
 
-help_text_m4 = r"""
+help_text_m5 = r"""
+**The Intuition:** Addresses the volatility clustering flaw in standard EVT. Extreme market shocks are not independent; they cluster. Fitting distributions directly to clustered data overstates tail risk. This model uses the "Runs Method" to isolate only the single largest peak within a 5-day shock window, ensuring the GPD is calibrated strictly on independent black swans.
+
+**The Math (Distributions & Drift):**
+* **The Runs Method:** $X_{i, \max} = \max_{r \in C_i} (|r|)$ over a $k=5$ day window.
+* **1-Period Return:** $R_t \sim F_{EVT}$ (Empirical Center + Declustered GPD Tails)
+* **Terminal Price:** $S_T = S_0 \exp\left( \sum_{t=1}^{N} R_t + \mu_{adj} T \right)$
+
+**Implementation:** Extracts block maxima from 5-day clusters. Calibrates the left and right GPD shape parameters ($\xi$) exclusively on those independent maxima, splices them to the empirical body, and simulates forward using Inverse Transform Sampling.
+"""
+
+help_text_m6 = r"""
 **The Intuition:** The gold standard for path dependency. Recognizes that an extreme shock today massively spikes the baseline volatility tomorrow (GARCH), creating sustained market panic.
 
 **The Math (Distributions & Drift):**
@@ -1026,6 +1402,17 @@ help_text_m4 = r"""
 * **Terminal Price:** $S_T = S_0 \exp\left( \sum_{t=1}^{N} R_t \right)$
 
 **Implementation:** Starts with today's volatility. Draws an EVT shock ($Z_t$), calculates the physical return ($R_t$), and critically, feeds that shock into the GARCH equation to update tomorrow's volatility ($\sigma_t$). A massive shock early in the simulation forces the stock to thrash violently for the remaining days.
+"""
+
+help_text_m7 = r"""
+**The Intuition:** Conventional GARCH uses the $L_2$ norm (variance), which requires the fourth moment to be finite. Because financial markets are fat-tailed ($\alpha < 4$), squaring extreme shocks causes the volatility filter to explode unreliably. This model filters historical simulations using the $L_1$ Mean Absolute Deviation (MAD), standardizing returns into highly stable, independent residuals before applying EVT.
+
+**The Math (Distributions & Drift):**
+* **$L_1$ Volatility Filter:** $MAD_t = \lambda MAD_{t-1} + (1 - \lambda)|r_{t-1}|$
+* **Standardized Residuals:** $z_t = \frac{r_t}{MAD_t}$
+* **Recursive Path Generation:** $r_{t+i} = z_{t+i} \cdot MAD_{t+i}$
+
+**Implementation:** Strips volatility clustering using an EWMA MAD filter. Fits the declustered Extreme Value Theory (EVT) shape parameters ($\xi$) strictly to the standardized residuals. During Monte Carlo simulation, it draws a residual jump, reconstructs the physical return, applies the subjective real-world drift, and dynamically updates the MAD filter for the next simulated day.
 """
 
 help_text_left_tail = r"""
@@ -1041,12 +1428,26 @@ This quantifies the "fatness" of the negative tail (market crashes).
 
 help_text_right_tail = r"""
 **Right Tail Shape Parameter ($\xi$)**
-This quantifies the "fatness" of the positive tail (market squeezes and euphoric rallies). 
+This quantifies the "fatness" of the positive tail (market squeezes and euphoric rallies).
 
-Because markets typically fall faster than they rise, this number is usually lower than the Left Tail index. If this number spikes, it indicates severe upside tail risk (e.g., a meme-stock short squeeze regime), increasing the fair value of deep out-of-the-money calls.
+* **$\xi \le 0$:** Thin tails (Normal risk).
+* **$0 < \xi < 0.5$:** Heavy tails. Extreme rallies are far more likely than a Normal distribution assumes.
+* **$\xi \ge 0.5$:** Infinite Variance. The tail is so fat that historical best-case scenarios do not limit future upside breakouts.
+
+*A higher number means out-of-the-money call options should carry a massive premium.*
 """
 
-# Native Header Tooltip for Option Greeks Profile Section
+help_text_vol_tail = r"""
+**Vol Tail Shape Parameter ($\xi$)**
+This quantifies the "fatness" of the extreme right tail of the volatility distribution (unprecedented volatility spikes and panic regimes).
+
+* **$\xi \le 0$:** Thin tails (Normal volatility risk).
+* **$0 < \xi < 0.5$:** Heavy tails. Extreme volatility spikes are far more likely than standard historical bootstrapping assumes.
+* **$\xi \ge 0.5$:** Infinite Variance. The volatility tail is so fat that the historical maximum volatility does not limit future market panic.
+
+*A higher number mathematically expands Volatility Convexity (Vomma/Volga), meaning all options should carry a massive structural premium.*
+"""
+
 help_text_greeks = r"""
 ### **Option Greeks Summary Guide**
 
@@ -1064,9 +1465,9 @@ help_text_greeks = r"""
 """
 
 
-# ==========================================
-# 2. STREAMLIT APP UI & LOGIC
-# ==========================================
+# ==============================================================================
+# 11. STREAMLIT APP UI, SIDEBAR CONTROLS & EXECUTION LOGIC
+# ==============================================================================
 
 st.set_page_config(page_title="Option Valuation Tool", layout="wide")
 
@@ -1127,6 +1528,8 @@ STRUCTURES = [
     "Put",
     "Call Spread",
     "Put Spread",
+    "Put Ratio Spread",
+    "Call Ratio Spread",
     "Put Spread + Call",
     "Call Spread + Put",
     "Butterfly",
@@ -1151,6 +1554,7 @@ def act(pos):
 st.sidebar.markdown("**Input Strikes (K1 to K4 from Lowest to Highest)**")
 
 K1, K2, K3, K4 = 0, 0, 0, 0
+anchor_qty, wing_qty = 1, 2  # Default ratio values
 
 if structure in ["Call", "Put", "Straddle"]:
     K1 = st.sidebar.number_input(f"Strike (K1) - [{act(1)}]", value=500.0, step=1.0)
@@ -1172,6 +1576,28 @@ elif structure == "Put Spread":
     K2 = st.sidebar.number_input(
         f"Upper Strike Put (K2) - [{act(1)}]", value=510.0, step=1.0
     )
+elif structure == "Put Ratio Spread":
+    K1 = st.sidebar.number_input(
+        f"Anchor Strike Put (K1) - [{act(-1)}]", value=350.0, step=1.0
+    )
+    K2 = st.sidebar.number_input(
+        f"Wing Strike Put (K2) - [{act(2)}]", value=300.0, step=1.0
+    )
+    ratio_mult = st.sidebar.selectbox("Ratio Multiplier", ["1x2", "1x3", "1x4"], index=0)
+    parts = ratio_mult.split("x")
+    anchor_qty = int(parts[0])
+    wing_qty = int(parts[1])
+elif structure == "Call Ratio Spread":
+    K1 = st.sidebar.number_input(
+        f"Anchor Strike Call (K1) - [{act(-1)}]", value=500.0, step=1.0
+    )
+    K2 = st.sidebar.number_input(
+        f"Wing Strike Call (K2) - [{act(2)}]", value=550.0, step=1.0
+    )
+    ratio_mult = st.sidebar.selectbox("Ratio Multiplier", ["1x2", "1x3", "1x4"], index=0)
+    parts = ratio_mult.split("x")
+    anchor_qty = int(parts[0])
+    wing_qty = int(parts[1])
 elif structure == "Put Spread + Call":
     K1 = st.sidebar.number_input(
         f"Lower Strike Put (K1) - [{act(-1)}]", value=480.0, step=1.0
@@ -1237,6 +1663,16 @@ elif structure == "Put Spread":
     legs = [
         {"type": "put", "strike": K2, "pos": 1},
         {"type": "put", "strike": K1, "pos": -1},
+    ]
+elif structure == "Put Ratio Spread":
+    legs = [
+        {"type": "put", "strike": K1, "pos": -anchor_qty},
+        {"type": "put", "strike": K2, "pos": wing_qty},
+    ]
+elif structure == "Call Ratio Spread":
+    legs = [
+        {"type": "call", "strike": K1, "pos": -anchor_qty},
+        {"type": "call", "strike": K2, "pos": wing_qty},
     ]
 elif structure == "Put Spread + Call":
     legs = [
@@ -1306,7 +1742,7 @@ q = st.sidebar.number_input(
 
 st.sidebar.markdown("**Expected Drift (\u03bc) Components**")
 beta = st.sidebar.number_input("Stock Beta (\u03b2)", value=1.000, step=0.001, format="%.3f")
-alpha = st.sidebar.number_input(
+alpha_drift = st.sidebar.number_input(
     "Alpha (\u03b1)",
     value=0.000,
     step=0.001,
@@ -1317,7 +1753,7 @@ erp = st.sidebar.number_input(
     "Equity Risk Premium (ERP)", value=0.050, step=0.001, format="%.3f"
 )
 
-mu = r + (beta * erp) + (alpha / T)
+mu = r + (beta * erp) + (alpha_drift / T)
 
 st.sidebar.markdown(
     f"""
@@ -1340,14 +1776,46 @@ if st.sidebar.button("Fetch Data & Value Options", type="primary"):
     st.session_state.run_sim = True
 
 if st.session_state.run_sim:
-    with st.spinner(f"Fetching max historical data for {ticker}..."):
+    etf_to_index_map = {
+        "SPY": "^GSPC",  # S&P 500 Index (History back to 1927)
+        "QQQ": "^NDX",   # Nasdaq-100 Index (History back to 1985)
+        "IWM": "^RUT",   # Russell 2000 Index (History back to 1987)
+        "DIA": "^DJI",   # Dow Jones Industrial Average
+        "GLD": "GC=F",   # Gold Futures continuous contract
+        "SLV": "SI=F"    # Silver Futures continuous contract
+    }
+
+    fetch_ticker = etf_to_index_map.get(ticker, ticker)
+
+    with st.spinner(f"Fetching max historical data for {ticker} via underlying source {fetch_ticker}..."):
         try:
-            ticker_obj = yf.Ticker(ticker)
-            data = ticker_obj.history(period="max")
+            index_obj = yf.Ticker(fetch_ticker)
+            data = index_obj.history(period="max")
 
             if data.empty:
-                st.error("No data found for this ticker.")
+                st.error(f"No historical data found for index/proxy {fetch_ticker}.")
                 st.stop()
+
+            etf_obj = yf.Ticker(ticker)
+            etf_data = etf_obj.history(period="5d")
+            
+            if etf_data.empty:
+                st.error(f"Could not fetch current live price for ETF {ticker}.")
+                st.stop()
+                
+            current_etf_price = float(etf_data["Close"].iloc[-1])
+            
+            valid_index_prices = data["Close"].dropna()
+            if isinstance(valid_index_prices, pd.DataFrame):
+                valid_index_prices = valid_index_prices.iloc[:, 0]
+                
+            current_index_price = float(valid_index_prices.iloc[-1])
+            
+            price_ratio = current_etf_price / current_index_price
+
+            for col in ["Open", "High", "Low", "Close"]:
+                if col in data.columns:
+                    data[col] = data[col] * price_ratio
 
             start_date = data.index.min().strftime("%Y-%m-%d")
             end_date = data.index.max().strftime("%Y-%m-%d")
@@ -1365,7 +1833,7 @@ if st.session_state.run_sim:
 
             bs_sigma = float(np.std(returns) * np.sqrt(252))
             years_of_data = len(returns) / 252.0
-            bs_sigma_label = f"Full Data ({years_of_data:.1f} Years)"
+            bs_sigma_label = f"Full Index Data [{fetch_ticker}] ({years_of_data:.1f} Years)"
 
             if len(returns) < trading_days_to_expiry:
                 st.error(
@@ -1382,16 +1850,17 @@ if st.session_state.run_sim:
             current_sigma = float(rolling_vol[-1])
 
             st.sidebar.markdown("---")
-            st.sidebar.subheader("📊 Data Description")
-            st.sidebar.metric("Spot Price", f"${S_0:.2f}")
+            st.sidebar.subheader("📊 Scaled Data Description")
+            st.sidebar.metric("Spot Price (ETF Scale)", f"${S_0:.2f}")
             st.sidebar.metric("Historical Vol", f"{bs_sigma*100:.2f}%")
+            st.sidebar.metric("Underlying Source", fetch_ticker)
             st.sidebar.metric("Start Date", start_date)
             st.sidebar.metric("End Date", end_date)
             st.sidebar.metric("Trading Years", f"{years_of_data:.1f}")
             st.sidebar.metric("Trading Days", f"{total_days:,}")
 
         except Exception as e:
-            st.error(f"❌ Error during Data Preparation: {e}")
+            st.error(f"❌ Error during Scaled Data Preparation: {e}")
             st.stop()
 
     st.markdown("---")
@@ -1411,7 +1880,7 @@ if st.session_state.run_sim:
         * **Spot Price ($S_0$):** ${S_0:.2f}
         * **Expiration Date:** {expiry_date.strftime('%B %d, %Y')} 
         * **Time to Expiry ($T$):** {T:.4f} years ({days_to_expiry} calendar days / {trading_days_to_expiry} trading days)
-        * **Expected Drift ($\mu$):** {mu:.3%} *(Calculated as: {r:.3%} + {beta:.3f} $\\times$ {erp:.3%} + {alpha:.3%} / {T:.4f})*
+        * **Expected Drift ($\mu$):** {mu:.3%} *(Calculated as: {r:.3%} + {beta:.3f} $\\times$ {erp:.3%} + {alpha_drift:.3%} / {T:.4f})*
         * **Risk-Free Rate ($r$):** {r:.3%}
         * **Dividend Yield ($q$):** {q:.3%}
         
@@ -1479,6 +1948,29 @@ if st.session_state.run_sim:
 
         try:
             (
+                hybrid_val,
+                hybrid_ST,
+                hybrid_payoffs,
+                hybrid_sampled_vols,
+                hybrid_shape,
+            ) = value_option_fitted_tail_volatility(
+                S_0,
+                legs,
+                T,
+                r,
+                mu,
+                rolling_vol,
+                q,
+                num_simulations=num_simulations,
+            )
+            results["Hybrid"] = (hybrid_val, hybrid_ST, hybrid_payoffs, hybrid_sampled_vols, hybrid_shape)
+            st_arrays.append(hybrid_ST)
+            payoff_arrays.append(hybrid_payoffs)
+        except Exception as e:
+            st.error(f"❌ Error in Hybrid Mixture Model Calculation: {e}")
+
+        try:
+            (
                 evt_val,
                 evt_ST,
                 evt_payoffs,
@@ -1500,6 +1992,31 @@ if st.session_state.run_sim:
             payoff_arrays.append(evt_payoffs)
         except Exception as e:
             st.error(f"❌ Error in EVT Calculation: {e}")
+
+        try:
+            (
+                dec_val,
+                dec_ST,
+                dec_payoffs,
+                dec_l_xi,
+                dec_r_xi,
+            ) = value_option_evt_declustered(
+                S_0,
+                legs,
+                T,
+                r,
+                mu,
+                hist_returns=returns,
+                q=q,
+                trading_days=trading_days_to_expiry,
+                num_simulations=num_simulations,
+                k_window=5,
+            )
+            results["Declustered_EVT"] = (dec_val, dec_ST, dec_payoffs, dec_l_xi, dec_r_xi)
+            st_arrays.append(dec_ST)
+            payoff_arrays.append(dec_payoffs)
+        except Exception as e:
+            st.error(f"❌ Error in Declustered EVT Calculation: {e}")
 
         try:
             (
@@ -1532,6 +2049,32 @@ if st.session_state.run_sim:
             payoff_arrays.append(garch_payoffs)
         except Exception as e:
             st.error(f"❌ Error in GARCH-EVT Calculation: {e}")
+            
+        try:
+            (
+                mad_val, 
+                mad_ST, 
+                mad_payoffs, 
+                mad_l_xi, 
+                mad_r_xi,
+            ) = value_option_mad_fhs_evt(
+                S_0, 
+                legs, 
+                T, 
+                r, 
+                mu, 
+                hist_returns=returns, 
+                q=q,
+                trading_days=trading_days_to_expiry, 
+                num_simulations=num_simulations, 
+                k_window=5, 
+                lam=0.94
+            )
+            results["MAD_FHS"] = (mad_val, mad_ST, mad_payoffs, mad_l_xi, mad_r_xi)
+            st_arrays.append(mad_ST)
+            payoff_arrays.append(mad_payoffs)
+        except Exception as e:
+            st.error(f"❌ Error in MAD-FHS EVT Calculation: {e}")
 
     xrange_ST = None
     xrange_payoff = None
@@ -1666,18 +2209,72 @@ if st.session_state.run_sim:
             use_container_width=True,
         )
 
+    if "Hybrid" in results:
+        st.markdown("---")
+        st.subheader(
+            "3. Black-Scholes Hybrid Mixture Model (Monte Carlo Simulation: Empirical Body + EVT Volatility Tail)",
+            help=help_text_m3,
+        )
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric(
+            "Expected Value / Premium",
+            f"${results['Hybrid'][0]:.2f}",
+            safe_pct_diff(results["Hybrid"][0], bs_val_baseline),
+        )
+
+        prob_itm = np.mean(results["Hybrid"][2] > 0) * 100
+        m2.metric(
+            "Prob. of Expiring ITM",
+            f"{prob_itm:.3f}%",
+            help="Probability the structure yields a strictly positive intrinsic value (Payoff > $0) at expiration.",
+        )
+
+        sampled_vols_hybrid = results["Hybrid"][3]
+        hybrid_shape = results["Hybrid"][4]
+        m3.metric("Min Sample Vol", f"{np.min(sampled_vols_hybrid)*100:.2f}%")
+        m4.metric("Avg Sample Vol", f"{np.mean(sampled_vols_hybrid)*100:.2f}%")
+        m5.metric("Max Sample Vol", f"{np.max(sampled_vols_hybrid)*100:.2f}%")
+        m6.metric(
+            "Vol Tail Shape (\u03BE)",
+            f"{hybrid_shape:.4f}",
+            help=help_text_vol_tail,
+        )
+
+        st.caption(
+            f"📍 **Strike Distribution Mapping:** {generate_percentile_string(results['Hybrid'][1], unique_strikes)}"
+        )
+        st.plotly_chart(
+            plot_histograms(
+                results["Hybrid"][1],
+                results["Hybrid"][2],
+                "Hybrid",
+                results["Hybrid"][0],
+                xrange_ST,
+                xrange_payoff,
+                xbins_ST,
+                xbins_payoff,
+                ymax_ST,
+                ymax_payoff,
+                vol_dist=sampled_vols_hybrid,
+                bs_vol_marker=bs_sigma,
+                rolling_window_days=trading_days_to_expiry,
+            ),
+            use_container_width=True,
+        )
+
     if "EVT" in results:
         st.markdown("---")
         st.subheader(
-            "3. Return-Based EVT Model (Daily Simulation: Empirical Center + EVT Tails)",
-            help=help_text_m3,
+            "4. Return-Based EVT Model (Daily Simulation: Empirical Center + EVT Tails)",
+            help=help_text_m4,
         )
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric(
             "Expected Value / Premium",
             f"${results['EVT'][0]:.2f}",
-            safe_pct_diff(results["EVT"][0], bs_val_baseline),
+            safe_pct_diff(results['EVT'][0], bs_val_baseline),
         )
 
         prob_itm = np.mean(results["EVT"][2] > 0) * 100
@@ -1717,18 +2314,69 @@ if st.session_state.run_sim:
             use_container_width=True,
         )
 
+    if "Declustered_EVT" in results:
+        st.markdown("---")
+        st.subheader(
+            "5. Declustered Return-Based EVT Model (Daily Simulation: Empirical Center + EVT Tails)",
+            help=help_text_m5,
+        )
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(
+            "Expected Value / Premium",
+            f"${results['Declustered_EVT'][0]:.2f}",
+            safe_pct_diff(results['Declustered_EVT'][0], bs_val_baseline),
+        )
+
+        prob_itm = np.mean(results["Declustered_EVT"][2] > 0) * 100
+        m2.metric(
+            "Prob. of Expiring ITM",
+            f"{prob_itm:.3f}%",
+            help="Probability the structure yields a strictly positive intrinsic value (Payoff > $0) at expiration.",
+        )
+
+        m3.metric(
+            "Declustered Left Tail (\u03BE)",
+            f"{results['Declustered_EVT'][3]:.4f}",
+            help=help_text_left_tail,
+        )
+        m4.metric(
+            "Declustered Right Tail (\u03BE)",
+            f"{results['Declustered_EVT'][4]:.4f}",
+            help=help_text_right_tail,
+        )
+
+        st.caption(
+            f"📍 **Strike Distribution Mapping:** {generate_percentile_string(results['Declustered_EVT'][1], unique_strikes)}"
+        )
+        st.plotly_chart(
+            plot_histograms(
+                results["Declustered_EVT"][1],
+                results["Declustered_EVT"][2],
+                "Declustered EVT",
+                results["Declustered_EVT"][0],
+                xrange_ST,
+                xrange_payoff,
+                xbins_ST,
+                xbins_payoff,
+                ymax_ST,
+                ymax_payoff,
+            ),
+            use_container_width=True,
+        )
+
     if "GARCH" in results:
         st.markdown("---")
         st.subheader(
-            "4. GARCH-EVT Filtered Historical Sim (Daily Simulation: Dynamic Vol + EVT Innovations)",
-            help=help_text_m4,
+            "6. GARCH-EVT Filtered Historical Sim (Daily Simulation: Dynamic Vol + EVT Innovations)",
+            help=help_text_m6,
         )
 
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1, m2, m3, m4, m5, m6_col = st.columns(6)
         m1.metric(
             "Expected Value / Premium",
             f"${results['GARCH'][0]:.2f}",
-            safe_pct_diff(results["GARCH"][0], bs_val_baseline),
+            safe_pct_diff(results['GARCH'][0], bs_val_baseline),
         )
 
         prob_itm = np.mean(results["GARCH"][2] > 0) * 100
@@ -1753,7 +2401,7 @@ if st.session_state.run_sim:
             f"{results['GARCH'][5]:.4f}",
             help="Volatility persistence parameter.",
         )
-        m6.metric(
+        m6_col.metric(
             "\u03B1 + \u03B2 (Mean Reversion)",
             f"{(results['GARCH'][4] + results['GARCH'][5]):.4f}",
             help="Must be < 1.0 for mean reversion to exist.",
@@ -1778,15 +2426,64 @@ if st.session_state.run_sim:
             use_container_width=True,
         )
 
+    if "MAD_FHS" in results:
+        st.markdown("---")
+        st.subheader(
+            "7. MAD-Based Filtered Historical Sim (Daily Simulation: L1 Dynamic Vol + EVT Innovations)",
+            help=help_text_m7,
+        )
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(
+            "Expected Value / Premium",
+            f"${results['MAD_FHS'][0]:.2f}",
+            safe_pct_diff(results['MAD_FHS'][0], bs_val_baseline),
+        )
+
+        prob_itm = np.mean(results["MAD_FHS"][2] > 0) * 100
+        m2.metric(
+            "Prob. of Expiring ITM",
+            f"{prob_itm:.3f}%",
+            help="Probability the structure yields a strictly positive intrinsic value (Payoff > $0) at expiration.",
+        )
+
+        m3.metric(
+            "Residual Left Tail (\u03BE)",
+            f"{results['MAD_FHS'][3]:.4f}",
+            help=help_text_left_tail,
+        )
+        m4.metric(
+            "Residual Right Tail (\u03BE)",
+            f"{results['MAD_FHS'][4]:.4f}",
+            help=help_text_right_tail,
+        )
+
+        st.caption(
+            f"📍 **Strike Distribution Mapping:** {generate_percentile_string(results['MAD_FHS'][1], unique_strikes)}"
+        )
+        st.plotly_chart(
+            plot_histograms(
+                results["MAD_FHS"][1],
+                results["MAD_FHS"][2],
+                "MAD-FHS EVT",
+                results["MAD_FHS"][0],
+                xrange_ST,
+                xrange_payoff,
+                xbins_ST,
+                xbins_payoff,
+                ymax_ST,
+                ymax_payoff,
+            ),
+            use_container_width=True,
+        )
+
     # ==========================================
-    # 5. RISK & SENSITIVITY PROFILER
+    # 12. RISK & SENSITIVITY PROFILER (SECTION 8)
     # ==========================================
     st.markdown("---")
 
-    # Native Header Tooltip Integration via 'help' param
-    st.header("5. Risk & Sensitivity Profiler", help=help_text_greeks)
+    st.header("8. Risk & Sensitivity Profiler", help=help_text_greeks)
 
-    # Pre-calculate Current State aggregate metrics across Spot array sizing = 1
     spot_arr = np.array([S_0])
     curr_delta = float(
         calculate_structure_greek(spot_arr, legs, T, r, q, bs_sigma, "Delta")[0]
@@ -1807,7 +2504,6 @@ if st.session_state.run_sim:
         calculate_structure_greek(spot_arr, legs, T, r, q, bs_sigma, "Theta")[0]
     )
 
-    # Render Current Dynamic Metrics Dashboard in logically related order
     st.markdown("#### **Aggregate Structure Greeks at Current State**")
     g1, g2, g3, g4, g5, g6 = st.columns(6)
     g1.metric("Delta (\u0394)", f"{curr_delta:+.3f}")
@@ -1859,7 +2555,6 @@ if st.session_state.run_sim:
                     use_container_width=True,
                 )
             with col2:
-                # Passing both bs_sigma (base) and rolling_vol (shocks) to ensure Premise Alignment
                 st.plotly_chart(
                     plot_vol_shock_profile(
                         S_range_prof,
