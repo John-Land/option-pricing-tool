@@ -68,7 +68,9 @@ $$\ln\left(\frac{S_T}{S_0}\right) \sim \mathcal{N}\left(\left(\mu - q - \frac{1}
 
 The terminal price $S_T$ is distributed lognormally:
 
-$$S_T \sim \text{Lognormal}\left(\ln S_0 + \mu_{adj} T, \, \sigma^2 T\right), \quad \text{where } \mu_{adj} = \mu - q - \frac{1}{2}\sigma^2$$
+$$S_T \sim \text{Lognormal}\left(\ln S_0 + \mu_{adj} T, \, \sigma^2 T\right)$$
+
+where $\mu_{adj} = \mu - q - \frac{1}{2}\sigma^2$.
 
 #### 3. Calibration & Parameter Estimation
 * **Volatility ($\sigma$):** Sample standard deviation of historical daily log returns scaled to an annual horizon:
@@ -117,13 +119,21 @@ For a trade with $D$ trading days to expiration:
    
    $$\sigma_{\tau} = \sqrt{\frac{252}{D-1} \sum_{k=\tau-D+1}^{\tau} (R_k - \bar{R}_{\tau})^2}, \quad \tau \in [D, N]$$
 
-2. Compile the discrete empirical set $\Omega_{\sigma} = \{\sigma_D, \sigma_{D+1}, \dots, \sigma_N\}$.
+2. Compile the discrete empirical set:
+   
+   $$\Omega_{\sigma} = \{\sigma_D, \sigma_{D+1}, \dots, \sigma_N\}$$
 
 #### 4. Valuation & Simulation Process
 1. For each simulation path $i \in \{1, \dots, N_{paths}\}$:
-   * Draw a volatility parameter uniformly with replacement: $\sigma_i \sim \text{Uniform}(\Omega_{\sigma})$.
+   * Draw a volatility parameter uniformly with replacement from the historical set:
+     
+     $$\sigma_i \sim \text{Uniform}(\Omega_{\sigma})$$
+     
    * Compute the analytical Black-Scholes structure value $V(\sigma_i)$ using sample volatility $\sigma_i$.
-   * Generate terminal spot price $S_T^{(i)} = S_0 \exp\left((\mu - q - \frac{1}{2}\sigma_i^2)T + \sigma_i \sqrt{T} Z^{(i)}\right)$, where $Z^{(i)} \sim \mathcal{N}(0,1)$.
+   * Generate terminal spot price:
+     
+     $$S_T^{(i)} = S_0 \exp\left((\mu - q - \frac{1}{2}\sigma_i^2)T + \sigma_i \sqrt{T} Z^{(i)}\right), \quad Z^{(i)} \sim \mathcal{N}(0,1)$$
+     
 2. Calculate the discounted expected structural value:
    
    $$\mathbb{E}[V] = e^{-rT} \frac{1}{M} \sum_{i=1}^M V(\sigma_i)$$
@@ -136,7 +146,9 @@ For a trade with $D$ trading days to expiration:
 Model 2 suffers from **empirical truncation**: it cannot simulate a volatility regime higher than the historical sample maximum. If an asset has never experienced a severe market dislocation within its specific data window, Model 2 understates extreme tail convexity. Model 3 splices the empirical volatility distribution with a Generalized Pareto Distribution (GPD) fitted to the top 10% extreme volatility exceedances.
 
 #### 2. Probabilistic Notation & Distributional Assumptions
-Let $\Sigma$ denote the rolling volatility random variable. The tail distribution above threshold $u$ (the 90th percentile $u = F_{\Sigma}^{-1}(0.90)$) is modeled via the Pickands-Balkema-de Haan Theorem:
+Let $\Sigma$ denote the rolling volatility random variable. The tail distribution above the 90th percentile threshold ($u$) is modeled via the Pickands-Balkema-de Haan Theorem:
+
+$$u = F_{\Sigma}^{-1}(0.90)$$
 
 $$\mathbb{P}(\Sigma - u \le y \mid \Sigma > u) \approx G_{\xi, \beta}(y) = 1 - \left(1 + \frac{\xi y}{\beta}\right)^{-1/\xi}$$
 
@@ -147,7 +159,12 @@ where:
 
 The composite cumulative distribution function for volatility is:
 
-$$F_{\text{Hybrid}}(\sigma) = \begin{cases} \hat{F}_n(\sigma) & \text{for } \sigma \le u \\ (1 - 0.10) + 0.10 \cdot G_{\xi, \beta}(\sigma - u) & \text{for } \sigma > u \end{cases}$$
+$$
+F_{\text{Hybrid}}(\sigma) = \begin{cases} 
+\hat{F}_n(\sigma) & \text{for } \sigma \le u \\\\ 
+(1 - 0.10) + 0.10 \cdot G_{\xi, \beta}(\sigma - u) & \text{for } \sigma > u 
+\end{cases}
+$$
 
 #### 3. Calibration & Parameter Estimation
 1. Compute the empirical 90th percentile threshold: $u = \text{Percentile}(\Omega_{\sigma}, 90)$.
@@ -160,7 +177,12 @@ $$F_{\text{Hybrid}}(\sigma) = \begin{cases} \hat{F}_n(\sigma) & \text{for } \sig
 1. Draw standard uniform random variate $U^{(i)} \sim \mathcal{U}(0, 1)$.
 2. Apply Inverse Transform Sampling:
    
-   $$\sigma_i = \begin{cases} \text{quantile of } \hat{F}_n \text{ at } U^{(i)} & \text{if } U^{(i)} \le 0.90 \\ u + \frac{\beta}{\xi}\left[\left(\frac{1 - U^{(i)}}{0.10}\right)^{-\xi} - 1\right] & \text{if } U^{(i)} > 0.90 \end{cases}$$
+   $$
+   \sigma_i = \begin{cases} 
+   \text{quantile of } \hat{F}_n \text{ at } U^{(i)} & \text{if } U^{(i)} \le 0.90 \\\\ 
+   u + \frac{\beta}{\xi}\left[\left(\frac{1 - U^{(i)}}{0.10}\right)^{-\xi} - 1\right] & \text{if } U^{(i)} > 0.90 
+   \end{cases}
+   $$
 
 3. Evaluate analytical option values at $\sigma_i$ and simulate $S_T^{(i)}$ paths using sampled $\sigma_i$.
 
@@ -174,7 +196,13 @@ Abandons Black-Scholes analytical integration entirely. Simulates price paths st
 #### 2. Probabilistic Notation & Distributional Assumptions
 Let $R_t = \ln(S_t / S_{t-1})$ denote daily log returns. The distribution $F_R(r)$ is partitioned into three regimes:
 
-$$F_R(r) = \begin{cases} \tau_L \left[1 + \frac{\xi_L (|r| - |u_L|)}{\beta_L}\right]^{-1/\xi_L} & \text{for } r < u_L \quad (\text{Left Crash Tail}) \\ \hat{F}_{\text{emp}}(r) & \text{for } u_L \le r \le u_R \quad (\text{Empirical Body}) \\ 1 - \tau_R \left[1 + \frac{\xi_R (r - u_R)}{\beta_R}\right]^{-1/\xi_R} & \text{for } r > u_R \quad (\text{Right Squeeze Tail}) \end{cases}$$
+$$
+F_R(r) = \begin{cases} 
+\tau_L \left[1 + \frac{\xi_L (|r| - |u_L|)}{\beta_L}\right]^{-1/\xi_L} & \text{for } r < u_L \quad (\text{Left Crash Tail}) \\\\ 
+\hat{F}_{\text{emp}}(r) & \text{for } u_L \le r \le u_R \quad (\text{Empirical Body}) \\\\ 
+1 - \tau_R \left[1 + \frac{\xi_R (r - u_R)}{\beta_R}\right]^{-1/\xi_R} & \text{for } r > u_R \quad (\text{Right Squeeze Tail}) 
+\end{cases}
+$$
 
 where $u_L$ is the 5th percentile return, $u_R$ is the 95th percentile return, and $\tau_L = \tau_R = 0.05$.
 
@@ -190,8 +218,10 @@ where $u_L$ is the 5th percentile return, $u_R$ is the 95th percentile return, a
 For each simulation path $i$:
 1. For each discrete trading day $t \in \{1, \dots, D\}$:
    * Draw uniform variate $U_t \sim \mathcal{U}(0, 1)$.
-   * If $U_t < 0.05$, draw a left-tail loss: $R_t = u_L - \text{GPD}^{-1}(U_t/0.05; \, \xi_L, \beta_L) - \bar{R}$.
-   * If $U_t > 0.95$, draw a right-tail gain: $R_t = u_R + \text{GPD}^{-1}((U_t - 0.95)/0.05; \, \xi_R, \beta_R) - \bar{R}$.
+   * If $U_t < 0.05$, draw a left-tail loss: 
+     $$R_t = u_L - \text{GPD}^{-1}(U_t/0.05; \, \xi_L, \beta_L) - \bar{R}$$
+   * If $U_t > 0.95$, draw a right-tail gain: 
+     $$R_t = u_R + \text{GPD}^{-1}((U_t - 0.95)/0.05; \, \xi_R, \beta_R) - \bar{R}$$
    * Otherwise, sample randomly with replacement from $R_{\text{center}}$.
 2. Apply drift and compound terminal spot:
    
@@ -211,7 +241,11 @@ Standard EVT requires returns to be independent and identically distributed (i.i
 Model 5 implements the **Runs Method** ($k=5$ day window) to cluster dependent exceedances, extracting only the single maximum shock per cluster to fit true, independent block maxima.
 
 #### 2. Probabilistic Notation & Distributional Assumptions
-Let $\{I_t\}_{t=1}^N$ be an indicator sequence where $I_t = \mathbb{I}_{\{R_t < u_L\}}$. An exceedance cluster $C_m = \{R_{t_1}, R_{t_2}, \dots, R_{t_p}\}$ is defined such that:
+Let an indicator sequence be defined for exceedances:
+
+$$I_t = \mathbb{I}_{\{R_t < u_L\}}, \quad t \in \{1, \dots, N\}$$
+
+An exceedance cluster $C_m = \{R_{t_1}, R_{t_2}, \dots, R_{t_p}\}$ is defined such that:
 
 $$t_{j+1} - t_j \le k, \quad \forall j \in \{1, \dots, p-1\}$$
 
@@ -226,8 +260,10 @@ $$\mathbb{P}(\tilde{Y} \le y) = 1 - \left(1 + \frac{\xi_D y}{\beta_D}\right)^{-1
 #### 3. Calibration & Parameter Estimation
 1. Scan historical returns $R_t$ chronologically. Group consecutive exceedances separated by fewer than $k=5$ days into a unified cluster.
 2. Isolate the extreme peak within each cluster:
-   * Left tail: $\tilde{y}_{L, m} = |u_L| - \min_{t \in C_m}(R_t)$
-   * Right tail: $\tilde{y}_{R, m} = \max_{t \in C_m}(R_t) - u_R$
+   * Left tail: 
+     $$\tilde{y}_{L, m} = |u_L| - \min_{t \in C_m}(R_t)$$
+   * Right tail: 
+     $$\tilde{y}_{R, m} = \max_{t \in C_m}(R_t) - u_R$$
 3. Fit declustered GPD parameters $(\xi_{L, \text{dec}}, \beta_{L, \text{dec}})$ and $(\xi_{R, \text{dec}}, \beta_{R, \text{dec}})$ using MLE exclusively on the independent peak vector.
 
 #### 4. Valuation & Simulation Process
@@ -255,7 +291,13 @@ where $\epsilon_{t-1} = R_{t-1} - \bar{R}$ is the demeaned return shock. Station
 
 The innovation distribution $F_Z(z)$ is modeled via EVT:
 
-$$F_Z(z) = \begin{cases} \tau_L \left[1 + \frac{\xi_L (|z| - |u_L|)}{\beta_L}\right]^{-1/\xi_L} & \text{for } z < u_L \\ \hat{F}_{\text{emp}}(z) & \text{for } u_L \le z \le u_R \\ 1 - \tau_R \left[1 + \frac{\xi_R (z - u_R)}{\beta_R}\right]^{-1/\xi_R} & \text{for } z > u_R \end{cases}$$
+$$
+F_Z(z) = \begin{cases} 
+\tau_L \left[1 + \frac{\xi_L (|z| - |u_L|)}{\beta_L}\right]^{-1/\xi_L} & \text{for } z < u_L \\\\ 
+\hat{F}_{\text{emp}}(z) & \text{for } u_L \le z \le u_R \\\\ 
+1 - \tau_R \left[1 + \frac{\xi_R (z - u_R)}{\beta_R}\right]^{-1/\xi_R} & \text{for } z > u_R 
+\end{cases}
+$$
 
 #### 3. Calibration & Parameter Estimation
 1. Fit $(\omega, \alpha, \beta)$ by minimizing the negative log-likelihood of centered returns:
@@ -273,10 +315,14 @@ For each path $i$:
 1. Initialize variance at current market state: $\sigma_1^2 = \sigma_{\text{latest}}^2$, and $S_1 = S_0$.
 2. For each day $t \in \{1, \dots, D\}$:
    * Draw an EVT-standardized shock $Z_t$ using Inverse Transform Sampling.
-   * Compute dynamic physical drift: $\mu_t = \left(\mu - q - \frac{1}{2}(\sigma_t^2 \cdot 252)\right) \Delta t$.
-   * Calculate daily log return: $r_t = \mu_t + \sigma_t Z_t$.
-   * Update spot price: $S_{t+1} = S_t \exp(r_t)$.
-   * Update next-day conditional variance: $\sigma_{t+1}^2 = \omega + \alpha (\sigma_t Z_t)^2 + \beta \sigma_t^2$.
+   * Compute dynamic physical drift: 
+     $$\mu_t = \left(\mu - q - \frac{1}{2}(\sigma_t^2 \cdot 252)\right) \Delta t$$
+   * Calculate daily log return: 
+     $$r_t = \mu_t + \sigma_t Z_t$$
+   * Update spot price: 
+     $$S_{t+1} = S_t \exp(r_t)$$
+   * Update next-day conditional variance: 
+     $$\sigma_{t+1}^2 = \omega + \alpha (\sigma_t Z_t)^2 + \beta \sigma_t^2$$
 3. Compute discounted terminal payoffs across all simulated paths.
 
 ---
@@ -317,15 +363,20 @@ Standardized residuals $z_t = \frac{R_t}{\text{MAD}_t}$ are declustered via the 
 
 #### 4. Valuation & Simulation Process
 For each path $i$:
-1. Initialize $\text{MAD}_1 = \text{MAD}_{\text{latest}}$, and $S_1 = S_0$.
+1. Initialize variance at current market state:
+   
+   $$\text{MAD}_1 = \text{MAD}_{\text{latest}}, \quad S_1 = S_0$$
+
 2. For each day $t \in \{1, \dots, D\}$:
    * Draw an EVT residual $z_t$ from the spliced declustered residual distribution.
-   * Compute the simulated physical return component: $r_{\text{sim}} = z_t \cdot \text{MAD}_t$.
+   * Compute the simulated physical return component: 
+     $$r_{\text{sim}} = z_t \cdot \text{MAD}_t$$
    * Calculate the local drift using the calibrated annualized scale correction:
      
      $$\mu_t = \left(\mu - q - \frac{1}{2}(\text{MAD}_t^2 \cdot 252)\right) \Delta t$$
    
-   * Update underlying price: $S_{t+1} = S_t \exp(r_{\text{sim}} + \mu_t)$.
+   * Update underlying price: 
+     $$S_{t+1} = S_t \exp(r_{\text{sim}} + \mu_t)$$
    * Update the $L_1$ scale parameter recursively for tomorrow:
      
      $$\text{MAD}_{t+1} = \lambda \text{MAD}_t + (1 - \lambda)|r_{\text{sim}}|$$
