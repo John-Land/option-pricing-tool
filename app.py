@@ -12,6 +12,7 @@
 # ==============================================================================
 
 import datetime
+import time
 from scipy.optimize import minimize
 from scipy.stats import genpareto, norm
 import numpy as np
@@ -33,8 +34,58 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
+# New imports for robust rate limiting and caching
+from requests import Session
+from requests_cache import CacheMixin, SQLiteCache
+from requests_ratelimiter import LimiterMixin, MemoryQueueBucket
+from pyrate_limiter import Duration, RequestRate, Limiter
+
+
 # ==============================================================================
-# 1. CORE MATH, TRADING CALENDAR & PAYOFF/GREEK UTILITIES
+# 1. YFINANCE RATE LIMITING & CACHING HANDLER
+# ==============================================================================
+
+class CachedLimiterSession(CacheMixin, LimiterMixin, Session):
+    """Custom session to handle Yahoo Finance rate limits and HTTP 429 errors."""
+    pass
+
+@st.cache_resource
+def get_yf_session():
+    """Initializes and caches a globally rate-limited yfinance session."""
+    session = CachedLimiterSession(
+        limiter=Limiter(RequestRate(2, Duration.SECOND * 5)),  # Max 2 requests per 5 seconds
+        bucket_class=MemoryQueueBucket,
+        backend=SQLiteCache("yfinance.cache"),
+    )
+    return session
+
+@st.cache_data(ttl=3600)
+def fetch_historical_data(ticker_symbol):
+    """Fetches and caches long-term historical data with length verification."""
+    session = get_yf_session()
+    for attempt in range(3):
+        data = yf.Ticker(ticker_symbol, session=session).history(period="max")
+        # Verify we received deep historical data (at least 1 year), 
+        # not a truncated 1-month fallback.
+        if len(data) > 252: 
+            return data
+        time.sleep(2) # Backoff before retrying
+    return pd.DataFrame() # Return empty if all attempts yield truncated data
+
+@st.cache_data(ttl=300)
+def fetch_recent_data(ticker_symbol):
+    """Fetches and caches short-term recent data (5 min TTL)."""
+    session = get_yf_session()
+    for attempt in range(3):
+        data = yf.Ticker(ticker_symbol, session=session).history(period="5d")
+        if not data.empty:
+            return data
+        time.sleep(2)
+    return pd.DataFrame()
+
+
+# ==============================================================================
+# 2. CORE MATH, TRADING CALENDAR & PAYOFF/GREEK UTILITIES
 # ==============================================================================
 
 class USTradingCalendar(AbstractHolidayCalendar):
@@ -62,13 +113,6 @@ def calculate_payoff(S_T: np.ndarray, legs: list) -> np.ndarray:
     Vectorized Terminal Payoff Calculator.
     Computes the aggregate intrinsic cash value of a multi-leg option structure 
     across a simulated array of terminal underlying spot prices (S_T).
-    
-    Parameters:
-    - S_T (np.ndarray): Array of simulated underlying spot prices at expiry.
-    - legs (list): List of dictionaries containing option type ('call'/'put'), strike, and position quantity.
-    
-    Returns:
-    - np.ndarray: Aggregate cash payoff for each simulated path.
     """
     total_payoff = np.zeros_like(S_T)
     for leg in legs:
@@ -93,18 +137,6 @@ def calculate_structure_greek(
     Vectorized Option Greeks and Valuation Engine.
     Computes analytical Black-Scholes values or specific first- and second-order Greeks 
     (Delta, Gamma, Vega, Theta, Rho, Vomma, Vanna) across an array of spot prices.
-    
-    Parameters:
-    - S (np.ndarray): Array of underlying spot prices.
-    - legs (list): Option structure leg definitions.
-    - T (float): Time to expiration in years.
-    - r (float): Risk-free interest rate.
-    - q (float): Continuous dividend yield.
-    - sigma (float): Volatility parameter.
-    - greek (str): Target metric name ('BS Value', 'Delta', 'Gamma', etc.).
-    
-    Returns:
-    - np.ndarray: Aggregated structural Greek or valuation across the spot array.
     """
     total_val = np.zeros_like(S, dtype=float)
     T_safe = max(T, 1e-5)  # Prevent division by zero near expiration
@@ -186,12 +218,7 @@ def calculate_structure_greek(
 
 
 # ==============================================================================
-# 2. PRICING MODEL 1: STANDARD BLACK-SCHOLES (CONSTANT VOLATILITY)
-# ==============================================================================
-# Thought Process & Statistical Rationale:
-# Assumes returns are lognormal and volatility is perfectly constant. It completely
-# ignores fat tails and market fragility, serving as the standard theoretical baseline
-# against which all fat-tail models are compared.
+# 3. PRICING MODEL 1: STANDARD BLACK-SCHOLES (CONSTANT VOLATILITY)
 # ==============================================================================
 
 def value_option_black_scholes(
@@ -232,14 +259,7 @@ def value_option_black_scholes(
 
 
 # ==============================================================================
-# 3. PRICING MODEL 2: BLACK-SCHOLES MIXTURE MODEL (BOOTSTRAPPED EMPIRICAL VOL)
-# ==============================================================================
-# Thought Process & Statistical Rationale:
-# Recognizes that volatility is not constant. By sampling from historical rolling
-# volatility regimes, it builds a mixture distribution. Because option prices are
-# convex to volatility (positive Vomma), Jensen's Inequality ensures this prices higher
-# than Model 1. However, it suffers from empirical truncation (cannot simulate
-# volatilities higher than historical max).
+# 4. PRICING MODEL 2: BLACK-SCHOLES MIXTURE MODEL (BOOTSTRAPPED EMPIRICAL VOL)
 # ==============================================================================
 
 def value_option_bootstrap_volatility(
@@ -287,12 +307,7 @@ def value_option_bootstrap_volatility(
 
 
 # ==============================================================================
-# 4. PRICING MODEL 3: BLACK-SCHOLES HYBRID MIXTURE MODEL (EMPIRICAL BODY + EVT TAIL)
-# ==============================================================================
-# Thought Process & Statistical Rationale:
-# Fixes the truncation flaw of Model 2 by applying Extreme Value Theory (EVT) to 
-# the right tail of the volatility distribution using a Generalized Pareto Distribution (GPD).
-# Allows synthesis of unprecedented volatility panics beyond historical maximums.
+# 5. PRICING MODEL 3: BLACK-SCHOLES HYBRID MIXTURE MODEL (EMPIRICAL BODY + EVT TAIL)
 # ==============================================================================
 
 def value_option_fitted_tail_volatility(
@@ -381,11 +396,7 @@ def fit_gpd(
 
 
 # ==============================================================================
-# 5. PRICING MODEL 4: RETURN-BASED EVT MODEL (EMPIRICAL CENTER + EVT TAILS)
-# ==============================================================================
-# Thought Process & Statistical Rationale:
-# Abandons Gaussian assumptions for daily return paths, splicing an empirical center
-# with GPD fitted left and right tails. Simulates path-dependent jumps directly.
+# 6. PRICING MODEL 4: RETURN-BASED EVT MODEL (EMPIRICAL CENTER + EVT TAILS)
 # ==============================================================================
 
 def value_option_evt_two_tailed(
@@ -456,13 +467,7 @@ def value_option_evt_two_tailed(
 
 
 # ==============================================================================
-# 6. PRICING MODEL 5: DECLUSTERED RETURN-BASED EVT MODEL (RUNS METHOD)
-# ==============================================================================
-# Thought Process & Statistical Rationale:
-# Resolves the volatility clustering flaw of Model 4. Because extreme shocks cluster,
-# fitting EVT directly to dependent returns overstates tail risk. This model applies 
-# the Runs Method ($k=5$ day window) to extract independent block maxima, isolating 
-# true standalone black swans for Paretian tail fitting ($\alpha = 1/\xi$).
+# 7. PRICING MODEL 5: DECLUSTERED RETURN-BASED EVT MODEL (RUNS METHOD)
 # ==============================================================================
 
 def decluster_extremes(returns: np.ndarray, threshold: float, tail: str = "left", k: int = 5) -> np.ndarray:
@@ -579,13 +584,7 @@ def value_option_evt_declustered(
 
 
 # ==============================================================================
-# 7. PRICING MODEL 6: GARCH-EVT FILTERED HISTORICAL SIMULATION ($L_2$ NORM)
-# ==============================================================================
-# Thought Process & Statistical Rationale:
-# Combines GARCH(1,1) dynamic variance modeling with EVT innovations. Captures 
-# volatility persistence (shocks today spike volatility tomorrow). However, 
-# because it relies on squared returns ($L_2$ norm), it can become numerically 
-# unstable in fat-tailed environments where the fourth moment is undefined.
+# 8. PRICING MODEL 6: GARCH-EVT FILTERED HISTORICAL SIMULATION ($L_2$ NORM)
 # ==============================================================================
 
 def fit_garch_11(returns: np.ndarray) -> tuple:
@@ -718,14 +717,7 @@ def value_option_garch_evt(
 
 
 # ==============================================================================
-# 8. PRICING MODEL 7: MAD-BASED FILTERED HISTORICAL SIMULATION ($L_1$ NORM + EVT)
-# ==============================================================================
-# Thought Process & Statistical Rationale:
-# The mathematically optimal path-dependent engine for fat-tailed markets. Replaces 
-# fragile $L_2$ variance with $L_1$ Mean Absolute Deviation (MAD). Because the first 
-# moment of financial returns is finite ($\alpha > 1$), $L_1$ standardizes returns 
-# safely without noise amplification, allowing recursive volatility updates 
-# and EVT tail draws without GARCH explosion.
+# 9. PRICING MODEL 7: MAD-BASED FILTERED HISTORICAL SIMULATION ($L_1$ NORM + EVT)
 # ==============================================================================
 
 def calculate_ewma_mad(returns: np.ndarray, lam: float = 0.94) -> np.ndarray:
@@ -799,7 +791,7 @@ def value_option_mad_fhs_evt(
 
 
 # ==============================================================================
-# 9. PLOTTING & VISUALIZATION UTILITIES
+# 10. PLOTTING & VISUALIZATION UTILITIES
 # ==============================================================================
 
 def safe_pct_diff(val: float, base: float) -> str:
@@ -1330,7 +1322,7 @@ def plot_3d_risk_surface_vol(
 
 
 # ==============================================================================
-# 10. TOOLTIP EXPLANATIONS & EDUCATIONAL DOCUMENTATION STRINGS
+# 11. TOOLTIP EXPLANATIONS & EDUCATIONAL DOCUMENTATION STRINGS
 # ==============================================================================
 
 help_text_m1 = r"""
@@ -1466,7 +1458,7 @@ help_text_greeks = r"""
 
 
 # ==============================================================================
-# 11. STREAMLIT APP UI, SIDEBAR CONTROLS & EXECUTION LOGIC
+# 12. STREAMLIT APP UI, SIDEBAR CONTROLS & EXECUTION LOGIC
 # ==============================================================================
 
 st.set_page_config(page_title="Option Valuation Tool", layout="wide")
@@ -1789,15 +1781,13 @@ if st.session_state.run_sim:
 
     with st.spinner(f"Fetching max historical data for {ticker} via underlying source {fetch_ticker}..."):
         try:
-            index_obj = yf.Ticker(fetch_ticker)
-            data = index_obj.history(period="max")
+            data = fetch_historical_data(fetch_ticker)
 
             if data.empty:
-                st.error(f"No historical data found for index/proxy {fetch_ticker}.")
+                st.error(f"No historical data found for index/proxy {fetch_ticker} or rate limit triggered.")
                 st.stop()
 
-            etf_obj = yf.Ticker(ticker)
-            etf_data = etf_obj.history(period="5d")
+            etf_data = fetch_recent_data(ticker)
             
             if etf_data.empty:
                 st.error(f"Could not fetch current live price for ETF {ticker}.")
@@ -2478,7 +2468,7 @@ if st.session_state.run_sim:
         )
 
     # ==========================================
-    # 12. RISK & SENSITIVITY PROFILER (SECTION 8)
+    # 13. RISK & SENSITIVITY PROFILER (SECTION 8)
     # ==========================================
     st.markdown("---")
 
