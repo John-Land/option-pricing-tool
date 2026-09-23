@@ -13,6 +13,7 @@
 
 import datetime
 import time
+import requests
 from scipy.optimize import minimize
 from scipy.stats import genpareto, norm
 import numpy as np
@@ -36,30 +37,51 @@ import yfinance as yf
 
 
 # ==============================================================================
-# 1. YFINANCE NATIVE CACHING HANDLER
+# 1. YFINANCE RATE LIMIT & CACHING HANDLER (V2)
 # ==============================================================================
 
-@st.cache_data(ttl=3600)
-def fetch_historical_data(ticker_symbol):
-    """Fetches and caches long-term historical data with length verification."""
+@st.cache_resource
+def get_yf_session():
+    """Creates a robust requests session with browser headers to prevent 429 errors."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    return session
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_historical_data_v2(ticker_symbol):
+    """Fetches and caches long-term historical data with strict length verification."""
+    session = get_yf_session()
     for attempt in range(3):
-        # We let yfinance use its own native session to avoid the Caching Exception
-        data = yf.Ticker(ticker_symbol).history(period="max")
-        
-        # Verify we received deep historical data (at least 1 year), 
-        # not a truncated 1-month fallback from a rate limit error.
-        if len(data) > 252: 
-            return data
+        try:
+            # Pass the custom session to bypass Yahoo's anti-bot crumb blocks
+            data = yf.Ticker(ticker_symbol, session=session).history(period="max", interval="1d")
+            
+            # Verify we received deep historical data (at least 1 year), 
+            # not a truncated 1-month fallback.
+            if data is not None and not data.empty and len(data) > 252:
+                data = data.dropna(subset=["Close"])
+                if len(data) > 252:
+                    return data
+        except Exception:
+            pass
         time.sleep(2) # Backoff before retrying
     return pd.DataFrame() # Return empty if all attempts yield truncated data
 
-@st.cache_data(ttl=300)
-def fetch_recent_data(ticker_symbol):
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_recent_data_v2(ticker_symbol):
     """Fetches and caches short-term recent data (5 min TTL)."""
+    session = get_yf_session()
     for attempt in range(3):
-        data = yf.Ticker(ticker_symbol).history(period="5d")
-        if not data.empty:
-            return data
+        try:
+            data = yf.Ticker(ticker_symbol, session=session).history(period="5d", interval="1d")
+            if data is not None and not data.empty:
+                return data.dropna(subset=["Close"])
+        except Exception:
+            pass
         time.sleep(2)
     return pd.DataFrame()
 
@@ -1761,13 +1783,14 @@ if st.session_state.run_sim:
 
     with st.spinner(f"Fetching max historical data for {ticker} via underlying source {fetch_ticker}..."):
         try:
-            data = fetch_historical_data(fetch_ticker)
+            # Using our updated cache-busting V2 functions
+            data = fetch_historical_data_v2(fetch_ticker)
 
             if data.empty:
                 st.error(f"No historical data found for index/proxy {fetch_ticker} or rate limit triggered.")
                 st.stop()
 
-            etf_data = fetch_recent_data(ticker)
+            etf_data = fetch_recent_data_v2(ticker)
             
             if etf_data.empty:
                 st.error(f"Could not fetch current live price for ETF {ticker}.")
@@ -1850,12 +1873,12 @@ if st.session_state.run_sim:
         * **Spot Price ($S_0$):** ${S_0:.2f}
         * **Expiration Date:** {expiry_date.strftime('%B %d, %Y')} 
         * **Time to Expiry ($T$):** {T:.4f} years ({days_to_expiry} calendar days / {trading_days_to_expiry} trading days)
-        * **Expected Drift ($\\mu$):** {mu:.3%} *(Calculated as: {r:.3%} + {beta:.3f} $\\times$ {erp:.3%} + {alpha_drift:.3%} / {T:.4f})*
+        * **Expected Drift ($\mu$):** {mu:.3%} *(Calculated as: {r:.3%} + {beta:.3f} $\\times$ {erp:.3%} + {alpha_drift:.3%} / {T:.4f})*
         * **Risk-Free Rate ($r$):** {r:.3%}
         * **Dividend Yield ($q$):** {q:.3%}
         
         **Volatility Inputs by Model:**
-        * **BS Sigma ($\\sigma$):** {bs_sigma:.3%} *({bs_sigma_label})*
+        * **BS Sigma ($\sigma$):** {bs_sigma:.3%} *({bs_sigma_label})*
         * **Bootstrap Volatility Array:** {len(rolling_vol)} historical {trading_days_to_expiry}-day rolling samples available for random draw
         
         **Simulation Details:**
