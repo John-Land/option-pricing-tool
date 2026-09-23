@@ -37,8 +37,7 @@ import yfinance as yf
 # New imports for robust rate limiting and caching
 from requests import Session
 from requests_cache import CacheMixin, SQLiteCache
-from requests_ratelimiter import LimiterMixin, MemoryQueueBucket
-from pyrate_limiter import Duration, RequestRate, Limiter
+from requests_ratelimiter import LimiterMixin
 
 
 # ==============================================================================
@@ -52,9 +51,9 @@ class CachedLimiterSession(CacheMixin, LimiterMixin, Session):
 @st.cache_resource
 def get_yf_session():
     """Initializes and caches a globally rate-limited yfinance session."""
+    # Simplified rate limiting using built-in kwargs to avoid API breaking changes
     session = CachedLimiterSession(
-        limiter=Limiter(RequestRate(2, Duration.SECOND * 5)),  # Max 2 requests per 5 seconds
-        bucket_class=MemoryQueueBucket,
+        per_second=0.5,  # Max 1 request per 2 seconds
         backend=SQLiteCache("yfinance.cache"),
     )
     return session
@@ -1870,12 +1869,12 @@ if st.session_state.run_sim:
         * **Spot Price ($S_0$):** ${S_0:.2f}
         * **Expiration Date:** {expiry_date.strftime('%B %d, %Y')} 
         * **Time to Expiry ($T$):** {T:.4f} years ({days_to_expiry} calendar days / {trading_days_to_expiry} trading days)
-        * **Expected Drift ($\mu$):** {mu:.3%} *(Calculated as: {r:.3%} + {beta:.3f} $\\times$ {erp:.3%} + {alpha_drift:.3%} / {T:.4f})*
+        * **Expected Drift ($\\mu$):** {mu:.3%} *(Calculated as: {r:.3%} + {beta:.3f} $\\times$ {erp:.3%} + {alpha_drift:.3%} / {T:.4f})*
         * **Risk-Free Rate ($r$):** {r:.3%}
         * **Dividend Yield ($q$):** {q:.3%}
         
         **Volatility Inputs by Model:**
-        * **BS Sigma ($\sigma$):** {bs_sigma:.3%} *({bs_sigma_label})*
+        * **BS Sigma ($\\sigma$):** {bs_sigma:.3%} *({bs_sigma_label})*
         * **Bootstrap Volatility Array:** {len(rolling_vol)} historical {trading_days_to_expiry}-day rolling samples available for random draw
         
         **Simulation Details:**
