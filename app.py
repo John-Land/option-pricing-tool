@@ -34,38 +34,20 @@ from plotly.subplots import make_subplots
 import streamlit as st
 import yfinance as yf
 
-# New imports for robust rate limiting and caching
-from requests import Session
-from requests_cache import CacheMixin, SQLiteCache
-from requests_ratelimiter import LimiterMixin
-
 
 # ==============================================================================
-# 1. YFINANCE RATE LIMITING & CACHING HANDLER
+# 1. YFINANCE NATIVE CACHING HANDLER
 # ==============================================================================
-
-class CachedLimiterSession(CacheMixin, LimiterMixin, Session):
-    """Custom session to handle Yahoo Finance rate limits and HTTP 429 errors."""
-    pass
-
-@st.cache_resource
-def get_yf_session():
-    """Initializes and caches a globally rate-limited yfinance session."""
-    # Simplified rate limiting using built-in kwargs to avoid API breaking changes
-    session = CachedLimiterSession(
-        per_second=0.5,  # Max 1 request per 2 seconds
-        backend=SQLiteCache("yfinance.cache"),
-    )
-    return session
 
 @st.cache_data(ttl=3600)
 def fetch_historical_data(ticker_symbol):
     """Fetches and caches long-term historical data with length verification."""
-    session = get_yf_session()
     for attempt in range(3):
-        data = yf.Ticker(ticker_symbol, session=session).history(period="max")
+        # We let yfinance use its own native session to avoid the Caching Exception
+        data = yf.Ticker(ticker_symbol).history(period="max")
+        
         # Verify we received deep historical data (at least 1 year), 
-        # not a truncated 1-month fallback.
+        # not a truncated 1-month fallback from a rate limit error.
         if len(data) > 252: 
             return data
         time.sleep(2) # Backoff before retrying
@@ -74,9 +56,8 @@ def fetch_historical_data(ticker_symbol):
 @st.cache_data(ttl=300)
 def fetch_recent_data(ticker_symbol):
     """Fetches and caches short-term recent data (5 min TTL)."""
-    session = get_yf_session()
     for attempt in range(3):
-        data = yf.Ticker(ticker_symbol, session=session).history(period="5d")
+        data = yf.Ticker(ticker_symbol).history(period="5d")
         if not data.empty:
             return data
         time.sleep(2)
