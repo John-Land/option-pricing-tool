@@ -328,7 +328,19 @@ Extreme market shocks cluster in time, violating the statistical independence as
 Because this declustering shrinks the effective sample size of tail events (sometimes down to just 15 or 20 isolated historical crashes), epistemic parameter uncertainty becomes massive. **Method A (Fisher Information Matrix)** mathematically penalizes this sample scarcity: the tiny sample creates a wide, flat inverse Hessian matrix, resulting in massive variance draws for the shape parameters and properly forcing the model to heavily overprice the wings to compensate for structural blindness.
 
 **Distributional Assumptions**
-Let $I_t = \mathbb{I}_{\{R_t < u_L\}}$ be an indicator sequence for raw daily exceedances. An exceedance cluster $C_m$ is defined such that the time gap between exceedance days satisfies $t_{j+1} - t_j \le k$. The true independent variable representing the tail is the cluster maximum:
+Let an indicator sequence for raw daily exceedances be defined as:
+
+$$
+I_t = \mathbb{I}_{\{R_t < u_L\}}
+$$
+
+An exceedance cluster $C_m$ is defined such that the time gap between exceedance days satisfies:
+
+$$
+t_{j+1} - t_j \le k
+$$
+
+The true independent variable representing the tail is the cluster maximum:
 
 $$
 \tilde{Y}_m = \max_{t \in C_m} (\vert{}R_t\vert{} - \vert{}u_{threshold}\vert{})
