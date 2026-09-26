@@ -278,7 +278,11 @@ where $\tau_L = \tau_R = 0.05$.
 **Valuation & Simulation Process**
 For each simulation path $i$:
 
-1. Draw stochastic left and right parameters from their respective multivariate normal distributions: $\theta_{L,i} \sim \mathcal{N}(\hat{\theta}_L, \Sigma_L)$ and $\theta_{R,i} \sim \mathcal{N}(\hat{\theta}_R, \Sigma_R)$.
+1. Draw stochastic left and right parameters from their respective multivariate normal distributions:
+
+$$
+\theta_{L,i} \sim \mathcal{N}(\hat{\theta}_L, \Sigma_L) \quad \text{and} \quad \theta_{R,i} \sim \mathcal{N}(\hat{\theta}_R, \Sigma_R)
+$$
 
 2. For each trading day $t$ in $N_{days}$, draw a uniform variate $U_t \sim \mathcal{U}(0, 1)$:
 
@@ -344,7 +348,11 @@ $$
 **Valuation & Simulation Process**
 For each simulation path $i$:
 
-1. Draw stochastic left and right parameters from their wide, declustered normal distributions: $\theta_{L, i} \sim \mathcal{N}(\hat{\theta}_{L, dec}, \Sigma_{L, dec})$ and $\theta_{R, i} \sim \mathcal{N}(\hat{\theta}_{R, dec}, \Sigma_{R, dec})$.
+1. Draw stochastic left and right parameters from their wide, declustered normal distributions:
+
+$$
+\theta_{L, i} \sim \mathcal{N}(\hat{\theta}_{L, dec}, \Sigma_{L, dec}) \quad \text{and} \quad \theta_{R, i} \sim \mathcal{N}(\hat{\theta}_{R, dec}, \Sigma_{R, dec})
+$$
 
 2. For each trading day $t$ in $N_{days}$, draw a uniform variate $U_t \sim \mathcal{U}(0, 1)$:
 
@@ -404,7 +412,12 @@ The standardized innovation $Z_t$ follows the three-regime spliced EVT distribut
 
 **Model Parameters & Stochastic Calibration (Method A)**
 
-* **GARCH Point Estimates:** $\hat{\theta}_{garch} = [\hat{\omega}, \hat{\alpha}, \hat{\beta}_{garch}]^T$.
+* **GARCH Point Estimates:** 
+
+$$
+\hat{\theta}_{garch} = [\hat{\omega}, \hat{\alpha}, \hat{\beta}_{garch}]^T
+$$
+
 * **GARCH Covariance (**$\Sigma_{garch}$**):** The $3 \times 3$ inverse Hessian matrix derived from the GARCH Gaussian log-likelihood optimization.
 * **Residual Tail Covariance (**$\Sigma_Z$**):** The inverse Hessian from the EVT fit of the standardized residuals.
 
@@ -486,9 +499,17 @@ Standardized $L_1$ residuals $z_t = \frac{R_t}{\text{MAD}_t}$ are declustered vi
 **Valuation & Simulation Process**
 For each simulation path $i$:
 
-1. Draw stochastic parameters for the left and right residual tails: $\theta_{Z, i} \sim \mathcal{N}(\hat{\theta}_{Z, dec}, \Sigma_{Z, dec})$.
+1. Draw stochastic parameters for the left and right residual tails:
 
-2. Initialize scale at the latest market state: $\text{MAD}_1 = \text{MAD}_{\text{latest}}$.
+$$
+\theta_{Z, i} \sim \mathcal{N}(\hat{\theta}_{Z, dec}, \Sigma_{Z, dec})
+$$
+
+2. Initialize scale at the latest market state:
+
+$$
+\text{MAD}_1 = \text{MAD}_{\text{latest}}
+$$
 
 3. For each trading day $t$:
 
@@ -639,3 +660,4 @@ $$
 * **SciPy:** Maximum Likelihood Estimation optimization and Extreme Value distributions.
 * **Plotly:** Interactive terminal payoff charts and 3D risk surfaces.
 * **yfinance:** Market data extraction with underlying proxy mapping.
+```eof
